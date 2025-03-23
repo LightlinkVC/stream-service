@@ -1,0 +1,41 @@
+version: '3.7'
+
+networks:
+  stream_service_network:
+
+services:
+  stream_service:
+    container_name: stream_service
+    env_file:
+      - ../cmd/.env
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    ports:
+      - "8085:8085"
+    depends_on:
+      stream_service_kurento:
+        condition: service_healthy
+    networks:
+      - stream_service_network
+
+  stream_service_kurento:
+    container_name: stream_service_kurento
+    build:
+      context: ..
+      dockerfile: kurento/Dockerfile
+    environment:
+      - KMS_STUN_IP=stun.l.google.com
+      - KMS_STUN_PORT=19302
+    ports:
+      - "8888:8888"
+    expose:
+      - 8888
+    healthcheck:
+      test: ["CMD", "websocat", "-U", "ws://localhost:8888/kurento"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - stream_service_network
