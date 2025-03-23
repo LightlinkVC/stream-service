@@ -52,17 +52,24 @@ type OnSDPOfferProcessResult struct {
 	RemoteSDPOffer string `json:"value"`
 }
 
+type OnSubscribeEventResult struct {
+	Value     string `json:"value"`
+	SessionID string `json:"sessionId"`
+}
+
+type MediaElement struct {
+	ID              string
+	SessionID       string
+	KurentoClient   *KurentoClient
+	SubscriptionIds []string
+}
+
 type MediaPipeline struct {
-	ID            string
-	SessionID     string
-	Endpoints     []WebRTCEndpoint
-	KurentoClient *KurentoClient
+	MediaElement
 }
 
 type WebRTCEndpoint struct {
-	ID            string
-	SessionID     string
-	KurentoClient *KurentoClient
+	MediaElement
 }
 
 type IceCandidate struct {
@@ -309,10 +316,12 @@ func (c *KurentoClient) CreateMediaPipeline() (*MediaPipeline, error) {
 	}
 
 	return &MediaPipeline{
-		ID:            response.ElementID,
-		SessionID:     response.SessionID,
-		Endpoints:     []WebRTCEndpoint{},
-		KurentoClient: c,
+		MediaElement: MediaElement{
+			ID:              response.ElementID,
+			SessionID:       response.SessionID,
+			KurentoClient:   c,
+			SubscriptionIds: []string{},
+		},
 	}, nil
 }
 
@@ -333,9 +342,12 @@ func (mp *MediaPipeline) CreateWebRtcEndpoint() (*WebRTCEndpoint, error) {
 	}
 
 	return &WebRTCEndpoint{
-		ID:            response.ElementID,
-		SessionID:     response.SessionID,
-		KurentoClient: mp.KurentoClient,
+		MediaElement: MediaElement{
+			ID:              response.ElementID,
+			SessionID:       response.SessionID,
+			KurentoClient:   mp.KurentoClient,
+			SubscriptionIds: []string{},
+		},
 	}, nil
 }
 
@@ -412,8 +424,39 @@ func (rtcEndpoint *WebRTCEndpoint) GatherICECandidates() error {
 	return nil
 }
 
+func (me *MediaElement) UnSubscribeOnEvent(eventId string) error {
+	_, err := me.KurentoClient.Call("unsubscribe", map[string]interface{}{
+		"object":       me.ID,
+		"subscription": eventId,
+		"sessionId":    me.SessionID,
+	})
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (me *MediaElement) SelfRelease() error {
+	for _, subscriptionId := range me.SubscriptionIds {
+		err := me.UnSubscribeOnEvent(subscriptionId)
+		if err != nil {
+			return err
+		}
+	}
+
+	_, err := me.KurentoClient.Call("release", map[string]interface{}{
+		"object":    me.ID,
+		"sessionId": me.SessionID,
+	})
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func (rtcEndpoint *WebRTCEndpoint) SubscribeOnEvent(eventName string) error {
-	_, err := rtcEndpoint.KurentoClient.Call("subscribe", map[string]interface{}{
+	result, err := rtcEndpoint.KurentoClient.Call("subscribe", map[string]interface{}{
 		"object":    rtcEndpoint.ID,
 		"type":      eventName,
 		"sessionId": rtcEndpoint.SessionID,
@@ -421,6 +464,13 @@ func (rtcEndpoint *WebRTCEndpoint) SubscribeOnEvent(eventName string) error {
 	if err != nil {
 		return err
 	}
+
+	var response OnSubscribeEventResult
+	if err := json.Unmarshal(result, &response); err != nil {
+		return err
+	}
+
+	rtcEndpoint.SubscriptionIds = append(rtcEndpoint.SubscriptionIds, response.Value)
 
 	return nil
 }
@@ -720,7 +770,7 @@ type SignalingRequest struct {
 	Payload json.RawMessage `json:"payload"`
 }
 
-func (h *BackgroundHandler) HandleSignal(w http.ResponseWriter, r *http.Request) {
+func (h *BackgroundHandler) SingalHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("Handling incoming client signal")
 
 	userID := r.Header.Get("X-User-ID")
@@ -903,6 +953,101 @@ func (h *BackgroundHandler) InfoHandler(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+func (h *SignalingHandler) handleUserLeft(roomID, userID string) error {
+	roomIface, ok := rooms.Load(roomID)
+	if !ok {
+		return errors.New("can't find such room")
+	}
+	room := roomIface.(*Room)
+
+	client, ok := room.Clients[userID]
+	if !ok {
+		return errors.New("can't find such user")
+	}
+
+	endpointToRoom.Delete(client.PublisherEndpoint.ID)
+	room.mu.Lock()
+	delete(room.EndpointToUser, client.PublisherEndpoint.ID)
+
+	err := client.PublisherEndpoint.SelfRelease()
+	if err != nil {
+		return err
+	}
+
+	for endpointID, endpoint := range client.SubscriberEndpoints {
+		endpointToRoom.Delete(endpointID)
+		delete(room.EndpointToUser, endpointID)
+
+		err := endpoint.SelfRelease()
+		if err != nil {
+			return err
+		}
+	}
+	delete(room.Clients, userID)
+	room.mu.Unlock()
+
+	if len(room.Clients) == 0 {
+		fmt.Printf("Room with id: %s is emty now\n", roomID)
+		rooms.Delete(roomID)
+
+		return nil
+	}
+
+	h.centrifugo.Publish(
+		roomChannel(roomID),
+		map[string]interface{}{
+			"type": "user_left",
+			"payload": map[string]interface{}{
+				"userId": userID,
+			},
+		},
+	)
+
+	return nil
+}
+
+func (h *BackgroundHandler) ConnectionStateHandler(w http.ResponseWriter, r *http.Request) {
+	upgrader := websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool { return true },
+	}
+
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Println("Ошибка WebSocket:", err)
+		return
+	}
+	defer conn.Close()
+
+	roomID := mux.Vars(r)["roomID"]
+	userIDString := r.URL.Query().Get("userID")
+	if userIDString == "" {
+		fmt.Println("Ошибка: userID отсутствует")
+		http.Error(w, "Ошибка: userID отсутствует", http.StatusBadRequest)
+		return
+	}
+
+	for {
+		_, msg, err := conn.ReadMessage()
+		if err != nil {
+			fmt.Printf("INFO: User with id: %s left room %s\n", userIDString, roomID)
+			h.handler.handleUserLeft(roomID, userIDString)
+			conn.Close()
+
+			break
+		}
+
+		var payload map[string]string
+		if err := json.Unmarshal(msg, &payload); err == nil {
+			if status, ok := payload["status"]; ok && status == "inactive" {
+				fmt.Printf("INFO: User with id: %s left room %s\n", userIDString, roomID)
+				h.handler.handleUserLeft(roomID, userIDString)
+				conn.Close()
+				break
+			}
+		}
+	}
+}
+
 func main() {
 	centrifugoKey := os.Getenv("CENTRIFUGO_HTTP_API_KEY")
 
@@ -927,7 +1072,8 @@ func main() {
 
 	router.HandleFunc("/api/room/{roomID}", backHandler.JoinHandler).Methods("POST")
 	router.HandleFunc("/api/room/{roomID}/info", backHandler.InfoHandler).Methods("GET")
-	router.HandleFunc("/api/room/{roomID}/signal", backHandler.HandleSignal).Methods("POST")
+	router.HandleFunc("/api/room/{roomID}/signal", backHandler.SingalHandler).Methods("POST")
+	router.HandleFunc("/ws/api/room/{roomID}/trace", backHandler.ConnectionStateHandler).Methods("GET")
 
 	log.Println("starting server at http://127.0.0.1:8085")
 	log.Fatal(http.ListenAndServe(":8085", router))
