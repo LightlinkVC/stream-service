@@ -32,10 +32,10 @@ services:
     expose:
       - 8888
     healthcheck:
-      test: ["CMD", "websocat", "-U", "ws://localhost:8888/kurento"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-      start_period: 10s
+      test: ["CMD", "websocat", "-U", "ws://127.0.0.1:8888/kurento"]
+      interval: 10s
+      retries: 5
+      start_period: 30s
+      timeout: 10s
     networks:
       - stream_service_network
