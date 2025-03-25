@@ -6,14 +6,20 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"os"
+	"os/signal"
+	"regexp"
 	"sync"
 	"time"
 
 	"github.com/dgrijalva/jwt-go"
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
+	"github.com/tinyzimmer/go-glib/glib"
+	"github.com/tinyzimmer/go-gst/gst"
+	"github.com/tinyzimmer/go-gst/gst/app"
 )
 
 var rooms = sync.Map{} // roomID -> *Room
@@ -704,6 +710,14 @@ func (h *SignalingHandler) HandleUserJoin(roomID, userID string) (*Client, error
 	}
 	endpointToRoom.Store(publisherEndpoint.ID, roomID)
 
+	// try in rtp
+	data, err := startRTPEndpoint(room.Pipeline, publisherEndpoint)
+	if err != nil {
+		return nil, err
+	}
+	go startAudioPipeline(data.AudioPort)
+	fmt.Println("DBG: Started listening through rtp with data: %v", data)
+
 	room.mu.RLock()
 	subscriberEndpoints := make(map[string]*WebRTCEndpoint)
 	existingUserIds := []string{}
@@ -1029,7 +1043,7 @@ func (h *BackgroundHandler) ConnectionStateHandler(w http.ResponseWriter, r *htt
 	for {
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
-			fmt.Printf("INFO: User with id: %s left room %s\n", userIDString, roomID)
+			fmt.Printf("INFO: User with id: %s left room %s with error: %s\n", userIDString, roomID, err.Error())
 			h.handler.handleUserLeft(roomID, userIDString)
 			conn.Close()
 
@@ -1047,6 +1061,428 @@ func (h *BackgroundHandler) ConnectionStateHandler(w http.ResponseWriter, r *htt
 		}
 	}
 }
+
+func testGST() {
+	fmt.Printf("Attempting to connect to Kurento Media Server at ws://%s:%s/kurento\n",
+		os.Getenv("KURENTO_MEDIA_SERVER_HOST"), os.Getenv("KURENTO_MEDIA_SERVER_PORT"))
+
+	client, err := NewKurentoClient(
+		fmt.Sprintf(
+			"ws://%s:%s/kurento",
+			os.Getenv("KURENTO_MEDIA_SERVER_HOST"),
+			os.Getenv("KURENTO_MEDIA_SERVER_PORT"),
+		),
+		&CentrifugoClient{},
+	)
+	if err != nil {
+		panic(err)
+	}
+	defer client.Close()
+	fmt.Println("connected")
+
+	pipeline, err := client.CreateMediaPipeline()
+	if err != nil {
+		panic(err)
+	}
+
+	rtcEndpoint, err := pipeline.CreateWebRtcEndpoint()
+	if err != nil {
+		panic(err)
+	}
+
+	resp, err := pipeline.KurentoClient.Call(
+		"create",
+		map[string]interface{}{
+			"type": "RtpEndpoint",
+			"constructorParams": map[string]interface{}{
+				"mediaPipeline": pipeline.ID,
+			},
+			"sessionId": pipeline.SessionID,
+		},
+	)
+
+	if err != nil {
+		panic(err)
+	}
+
+	var res struct {
+		Value     string `json:"value"`
+		SessionID string `json:"sessionId"`
+	}
+
+	err = json.Unmarshal(resp, &res)
+	if err != nil {
+		panic(err)
+	}
+
+	_, err = pipeline.KurentoClient.Call(
+		"invoke",
+		map[string]interface{}{
+			"object":    rtcEndpoint.ID,
+			"operation": "connect",
+			"operationParams": map[string]interface{}{
+				"sink": res.Value,
+			},
+			"sessionId": pipeline.SessionID,
+		},
+	)
+	if err != nil {
+		panic(err)
+	}
+
+	resp2, err := pipeline.KurentoClient.Call(
+		"invoke",
+		map[string]interface{}{
+			"object":    res.Value,
+			"operation": "generateOffer",
+			"sessionId": pipeline.SessionID,
+		},
+	)
+	if err != nil {
+		panic(err)
+	}
+
+	var res2 struct {
+		Value     string `json:"value"`
+		SessionID string `json:"sessionId"`
+	}
+
+	err = json.Unmarshal(resp2, &res2)
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println(res2.Value)
+
+	ipRegex := regexp.MustCompile(`c=IN IP4 (\S+)`)
+	audioPortRegex := regexp.MustCompile(`m=audio (\d+)`)
+	videoPortRegex := regexp.MustCompile(`m=video (\d+)`)
+
+	// Извлекаем данные
+	rtpHost := ipRegex.FindStringSubmatch(res2.Value)[1]
+	audioPort := audioPortRegex.FindStringSubmatch(res2.Value)[1]
+	videoPort := videoPortRegex.FindStringSubmatch(res2.Value)[1]
+
+	// Выводим данные
+	fmt.Printf("rtpHost := \"%s\"\n", rtpHost)
+	fmt.Printf("audioPort := %s\n", audioPort)
+	fmt.Printf("videoPort := %s\n", videoPort)
+
+	gst.Init(nil)
+
+	mainLoop := glib.NewMainLoop(glib.MainContextDefault(), false)
+
+	pipelineStr := fmt.Sprintf(
+		"udpsrc port=%s caps=\"application/x-rtp, media=audio\" ! "+
+			"rtpjitterbuffer ! "+
+			"rtpopusdepay ! "+
+			"opusdec ! "+
+			"audioconvert ! "+
+			"audioresample ! "+
+			"appsink name=audio_sink", // Будем читать данные отсюда
+		audioPort)
+
+	pipe, err := gst.NewPipelineFromString(pipelineStr)
+	if err != nil {
+		panic(fmt.Sprintf("Failed to create pipeline: %v", err))
+	}
+
+	// Получение appsink
+	el, err := pipe.GetElementByName("audio_sink")
+	if err != nil {
+		panic(err)
+	}
+
+	appsink := app.SinkFromElement(el)
+	if err != nil {
+		panic(err)
+	}
+
+	// Чтение аудиоданных
+	go func() {
+		for {
+			// Получаем сэмпл из appsink
+			sample := appsink.PullSample()
+			if sample == nil {
+				break
+			}
+
+			// Получаем буфер с аудиоданными
+			buffer := sample.GetBuffer()
+			data := buffer.Map(gst.MapRead).Data()
+			defer buffer.Unmap()
+
+			// Выводим данные в консоль (можно преобразовать в строку для удобства)
+			fmt.Printf("Received audio data: %v\n", data)
+		}
+	}()
+
+	pipe.GetPipelineBus().AddWatch(func(msg *gst.Message) bool {
+		switch msg.Type() {
+		case gst.MessageError:
+			err := msg.ParseError()
+			fmt.Println("ERROR:", err.Error())
+			if debug := err.DebugString(); debug != "" {
+				fmt.Println("DEBUG:", debug)
+			}
+			mainLoop.Quit()
+		default:
+			fmt.Println(msg)
+		}
+		return true
+	})
+
+	pipe.SetState(gst.StatePlaying)
+	mainLoop.Run()
+}
+
+func createPipeline(audioPort string) (*gst.Pipeline, error) {
+	gst.Init(nil)
+
+	// Создаем пайплайн из строки
+	// pipelineStr := fmt.Sprintf(
+	// 	"udpsrc port=%s caps=\"application/x-rtp,media=audio,payload=96,encoding-name=OPUS,clock-rate=48000\" ! "+
+	// 		"rtpjitterbuffer latency=200 drop-on-latency=true ! "+
+	// 		"rtpopusdepay ! "+
+	// 		"opusdec plc=true ! "+
+	// 		"audioconvert ! "+
+	// 		"audioresample ! "+
+	// 		"appsink name=audio_sink sync=false async=false max-buffers=1 drop=true",
+	// 	audioPort)
+
+	pipelineStr := fmt.Sprintf(
+		"udpsrc port=%s caps=\"application/x-rtp,media=audio,payload=96,encoding-name=OPUS,clock-rate=48000\" ! "+
+			"rtpjitterbuffer latency=200 ! "+
+			"rtpopusdepay ! "+
+			"opusdec plc=true ! "+
+			"audioconvert ! "+
+			"audioresample ! "+
+			"tee name=t ! "+
+			"queue ! "+
+			"appsink name=audio_sink sync=false async=false "+
+			"t. ! queue ! wavenc ! filesink location=test.wav",
+		audioPort)
+
+	pipe, err := gst.NewPipelineFromString(pipelineStr)
+	if err != nil {
+		fmt.Println("GST: failed to create pipeline")
+		return nil, fmt.Errorf("failed to create pipeline: %v", err)
+	}
+
+	// Получаем appsink
+	element, err := pipe.GetElementByName("audio_sink")
+	if err != nil {
+		fmt.Println("GST: failed to GetElementByName")
+		return nil, err
+	}
+	appsink := app.SinkFromElement(element)
+
+	// Устанавливаем caps для аудио
+	appsink.SetCaps(gst.NewCapsFromString(
+		"audio/x-raw, format=S16LE, layout=interleaved, rate=48000, channels=2",
+	))
+
+	// Устанавливаем обработчики
+	appsink.SetCallbacks(&app.SinkCallbacks{
+		NewSampleFunc: func(sink *app.Sink) gst.FlowReturn {
+			sample := sink.PullSample()
+			if sample == nil {
+				return gst.FlowEOS
+			}
+
+			buffer := sample.GetBuffer()
+			if buffer == nil {
+				return gst.FlowError
+			}
+
+			samples := buffer.Map(gst.MapRead).AsInt16LESlice()
+			defer buffer.Unmap()
+
+			// Обработка аудиоданных
+			var square float64
+			for _, i := range samples {
+				square += float64(i * i)
+			}
+			rms := math.Sqrt(square / float64(len(samples)))
+			fmt.Println("rms:", rms)
+
+			return gst.FlowOK
+		},
+	})
+
+	return pipe, nil
+}
+
+func handleMessage(msg *gst.Message) error {
+	switch msg.Type() {
+	// case gst.MessageEOS:
+	// 	return fmt.Errorf("end of stream")
+	case gst.MessageError:
+		return msg.ParseError()
+	case gst.MessageWarning:
+		warn := msg.ParseWarning()
+		fmt.Printf("WARNING: %s\nDebug: %s\n", warn.Error(), warn.DebugString())
+	}
+	return nil
+}
+
+func startAudioPipeline(audioPort string) error {
+	// Создаем пайплайн
+	pipeline, err := createPipeline(audioPort)
+	if err != nil {
+		fmt.Println("GST: failed to create pipe")
+		return err
+	}
+
+	// Запускаем пайплайн
+	pipeline.SetState(gst.StatePlaying)
+
+	// Настраиваем обработку сигналов
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt)
+	go func() {
+		<-c
+		fmt.Println("\nReceived interrupt, shutting down...")
+		pipeline.SendEvent(gst.NewEOSEvent())
+	}()
+
+	// Получаем bus для обработки сообщений
+	bus := pipeline.GetPipelineBus()
+
+	// Основной цикл обработки сообщений
+	for {
+		msg := bus.TimedPop(time.Duration(-1))
+		if msg == nil {
+			break
+		}
+		if err := handleMessage(msg); err != nil {
+			// Остановка пайплайна при ошибке
+			pipeline.SetState(gst.StateNull)
+			fmt.Println("GST: error msg: ", err.Error())
+			return err
+		}
+	}
+
+	// Корректное завершение
+	pipeline.SetState(gst.StateNull)
+	return nil
+}
+
+type StreamData struct {
+	RtpHost   string
+	AudioPort string
+	VideoPort string
+}
+
+// Функция для работы с Kurento API и получения необходимых данных
+func startRTPEndpoint(pipeline *MediaPipeline, rtcEndpoint *WebRTCEndpoint) (*StreamData, error) {
+	// 1. Создание RtpEndpoint
+	resp, err := pipeline.KurentoClient.Call(
+		"create",
+		map[string]interface{}{
+			"type": "RtpEndpoint",
+			"constructorParams": map[string]interface{}{
+				"mediaPipeline": pipeline.ID,
+			},
+			"sessionId": pipeline.SessionID,
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create RtpEndpoint: %v", err)
+	}
+
+	var res struct {
+		Value     string `json:"value"`
+		SessionID string `json:"sessionId"`
+	}
+
+	err = json.Unmarshal(resp, &res)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal response: %v", err)
+	}
+
+	// 2. Подключаем sink
+	_, err = pipeline.KurentoClient.Call(
+		"invoke",
+		map[string]interface{}{
+			"object":    rtcEndpoint.ID,
+			"operation": "connect",
+			"operationParams": map[string]interface{}{
+				"sink": res.Value,
+			},
+			"sessionId": pipeline.SessionID,
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect: %v", err)
+	}
+
+	// 3. Генерация offer
+	resp2, err := pipeline.KurentoClient.Call(
+		"invoke",
+		map[string]interface{}{
+			"object":    res.Value,
+			"operation": "generateOffer",
+			"sessionId": pipeline.SessionID,
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate offer: %v", err)
+	}
+
+	var res2 struct {
+		Value     string `json:"value"`
+		SessionID string `json:"sessionId"`
+	}
+
+	err = json.Unmarshal(resp2, &res2)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal response2: %v", err)
+	}
+
+	// 4. Извлечение данных из offer
+	ipRegex := regexp.MustCompile(`c=IN IP4 (\S+)`)
+	audioPortRegex := regexp.MustCompile(`m=audio (\d+)`)
+	videoPortRegex := regexp.MustCompile(`m=video (\d+)`)
+
+	// Извлекаем данные
+	rtpHost := ipRegex.FindStringSubmatch(res2.Value)[1]
+	audioPort := audioPortRegex.FindStringSubmatch(res2.Value)[1]
+	videoPort := videoPortRegex.FindStringSubmatch(res2.Value)[1]
+
+	sdpAnswer := fmt.Sprintf(`v=0
+		o=- 0 0 IN IP4 %s
+		s=-
+		c=IN IP4 %s
+		t=0 0
+		m=audio %s RTP/AVP 96
+		a=rtpmap:96 opus/48000/2
+		a=sendrecv`, "stream_service", "stream_service", audioPort)
+
+	fmt.Println("CHECK: ", sdpAnswer)
+
+	// Отправляем SDP Answer обратно в Kurento
+	_, err = pipeline.KurentoClient.Call("invoke", map[string]interface{}{
+		"object":    res.Value,
+		"operation": "processAnswer",
+		"operationParams": map[string]interface{}{
+			"answer": sdpAnswer,
+		},
+		"sessionId": pipeline.SessionID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to process answer: %v", err)
+	}
+
+	// Возвращаем структуру с результатами
+	return &StreamData{
+		RtpHost:   rtpHost,
+		AudioPort: audioPort,
+		VideoPort: videoPort,
+	}, nil
+}
+
+/*Пофиксить gst работу, кажется, она блочит поток*/
 
 func main() {
 	centrifugoKey := os.Getenv("CENTRIFUGO_HTTP_API_KEY")
