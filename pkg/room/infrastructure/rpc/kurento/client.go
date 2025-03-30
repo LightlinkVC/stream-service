@@ -222,9 +222,9 @@ func (c *KurentoClient) CreateMediaPipeline() (*MediaPipeline, error) {
 	return &MediaPipeline{
 		MediaElement: MediaElement{
 			ID:              response.ElementID,
-			SessionID:       response.SessionID,
-			KurentoClient:   c,
-			SubscriptionIds: []string{},
+			sessionID:       response.SessionID,
+			kurentoClient:   c,
+			subscriptionIds: []string{},
 		},
 	}, nil
 }

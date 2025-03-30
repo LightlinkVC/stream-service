@@ -1,5 +1,5 @@
 package kurento
 
-type WebRTCEndpoint struct {
+type RTPEndpoint struct {
 	BaseEndpoint
 }
