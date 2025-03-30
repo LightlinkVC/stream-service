@@ -14,6 +14,9 @@ import (
 	"github.com/lightlink/stream-service/pkg/room/infrastructure/repository/inmemory"
 	"github.com/lightlink/stream-service/pkg/room/infrastructure/rpc/kurento"
 	"github.com/lightlink/stream-service/pkg/room/infrastructure/ws/centrifugo"
+	proto "github.com/lightlink/stream-service/protogen/rtpproxy"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 func main() {
@@ -29,6 +32,12 @@ func main() {
 		&sync.Map{},
 	)
 
+	client, _ := grpc.Dial(
+		fmt.Sprintf("%s:%s", os.Getenv("RTP_PROXY_SERVICE_GRPC_HOST"), os.Getenv("RTP_PROXY_SERVICE_GRPC_PORT")),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	rtpProxyClient := proto.NewRtpProxyServiceClient(client)
+
 	eventHandler := eventhandler.NewDefaultEventHandler(centrifugoClient, roomRepository)
 
 	kurentoClient, err := kurento.NewKurentoClient(
@@ -43,7 +52,12 @@ func main() {
 		panic(err)
 	}
 
-	roomManager := roommanager.NewDefaultRoomManager(kurentoClient, roomRepository, centrifugoClient)
+	roomManager := roommanager.NewDefaultRoomManager(
+		kurentoClient,
+		roomRepository,
+		centrifugoClient,
+		rtpProxyClient,
+	)
 
 	roomHandler := roomDelivery.NewRoomHandler(roomManager, centrifugoClient)
 
