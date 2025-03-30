@@ -1,45 +1,31 @@
-FROM ubuntu:22.04 AS builder
+FROM golang:alpine AS builder
+LABEL stage=gobuilder
 
-# Установка зависимостей
-RUN apt-get update && apt-get install -y \
-    wget \
-    build-essential \
-    pkg-config \
-    libgstreamer1.0-dev \
-    libgstreamer-plugins-base1.0-dev \
-    libgstreamer-plugins-good1.0-dev \
-    gstreamer1.0-plugins-bad \
-    gstreamer1.0-plugins-ugly \
-    gstreamer1.0-libav
+ENV CGO_ENABLED 0
+ENV GOOS linux
 
-# Установка Go 1.22
-RUN wget https://go.dev/dl/go1.22.1.linux-amd64.tar.gz
-RUN tar -C /usr/local -xzf go1.22.1.linux-amd64.tar.gz
-ENV PATH="/usr/local/go/bin:${PATH}"
+RUN apk update --no-cache && apk add --no-cache tzdata
 
 WORKDIR /build
+
+COPY ./go.mod .
+COPY ./go.sum .
+
+RUN go mod download
+
 COPY . .
 
-# Компиляция
-RUN CGO_ENABLED=1 go build -ldflags="-s -w" -o /build/bin/main ./cmd/
+RUN go build -ldflags="-s -w" -o /build/bin/main ./cmd/
 
-# Финальный образ
-FROM ubuntu:22.04
+FROM alpine
 
-RUN apt-get update && apt-get install -y \
-    libgstreamer1.0-0 \
-    gstreamer1.0-plugins-base \
-    gstreamer1.0-plugins-good \
-    gstreamer1.0-plugins-bad \
-    gstreamer1.0-plugins-ugly \
-    gstreamer1.0-libav
+RUN apk update --no-cache
 
-WORKDIR /app
-COPY --from=builder /build/bin/main .
+WORKDIR /stream-service/bin
+
 COPY --from=builder /build/cmd/.env .
-
-ENV GST_PLUGIN_SYSTEM_PATH=/usr/lib/x86_64-linux-gnu/gstreamer-1.0
-ENV CGO_ENABLED=1
+COPY --from=builder /build/bin/main .
 
 EXPOSE 8085
+
 CMD ["./main"]
