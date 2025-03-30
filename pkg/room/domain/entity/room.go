@@ -7,9 +7,11 @@ import (
 )
 
 type Room struct {
-	ID             string
-	Clients        map[string]*Client // key = userID
-	EndpointToUser map[string]string
-	Pipeline       *kurento.MediaPipeline
-	MU             *sync.RWMutex
+	ID                string
+	Clients           map[string]*Client // key = userID
+	EndpointToUser    map[string]string
+	Pipeline          *kurento.MediaPipeline
+	MU                *sync.RWMutex
+	CompositeHub      *kurento.Composite
+	OutputRTPEndpoint *kurento.RTPEndpoint
 }

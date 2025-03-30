@@ -28,6 +28,11 @@ type OnSubscribeEventResult struct {
 	SessionID string `json:"sessionId"`
 }
 
+type OnGenerateSDPOfferResult struct {
+	SDPOffer  string `json:"value"`
+	SessionID string `json:"sessionId"`
+}
+
 type IceCandidate struct {
 	Candidate     string `json:"candidate"`
 	SdpMid        string `json:"sdpMid"`
