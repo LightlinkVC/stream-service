@@ -1,6 +1,7 @@
 package roommanager
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -11,6 +12,7 @@ import (
 	"github.com/lightlink/stream-service/pkg/room/infrastructure/rpc"
 	"github.com/lightlink/stream-service/pkg/room/infrastructure/rpc/kurento"
 	"github.com/lightlink/stream-service/pkg/room/infrastructure/ws"
+	proto "github.com/lightlink/stream-service/protogen/rtpproxy"
 )
 
 type RoomManager interface {
@@ -23,17 +25,20 @@ type DefaultRoomManager struct {
 	kurentoClient   rpc.RPCClient
 	roomRepo        repository.RoomRepository
 	messagingServer ws.MessagingServer
+	rtpProxyClient  proto.RtpProxyServiceClient
 }
 
 func NewDefaultRoomManager(
 	kurentoClient rpc.RPCClient,
 	roomRepo repository.RoomRepository,
 	messagingServer ws.MessagingServer,
+	rtpProxyClient proto.RtpProxyServiceClient,
 ) *DefaultRoomManager {
 	return &DefaultRoomManager{
 		kurentoClient:   kurentoClient,
 		roomRepo:        roomRepo,
 		messagingServer: messagingServer,
+		rtpProxyClient:  rtpProxyClient,
 	}
 }
 
@@ -52,12 +57,54 @@ func (rm *DefaultRoomManager) getOrCreateRoom(roomID string) (*entity.Room, erro
 		return nil, fmt.Errorf("failed to create media pipeline: %v", err)
 	}
 
+	hub, err := pipeline.CreateComposite()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create hub: %v", err)
+	}
+
+	outputRTPEndpoint, err := pipeline.CreateRTPEndpoint()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create output rtp: %v", err)
+	}
+
+	rptEndpointSDPOffer, err := outputRTPEndpoint.GenerateSDPOffer()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create sdp offer from rtp: %v", err)
+	}
+	sdpAnwerProto, err := rm.rtpProxyClient.ExchangeSdp(context.Background(),
+		&proto.SdpOffer{
+			RoomId: roomID,
+			Sdp:    rptEndpointSDPOffer,
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to exchange sdp: %v", err)
+	}
+	err = outputRTPEndpoint.ProcessSDPAnswer(sdpAnwerProto.Sdp)
+	if err != nil {
+		return nil, fmt.Errorf("failed to apply sdp answer for rtp: %v", err)
+	}
+
+	fmt.Printf("HUBMETA:%v\n", hub)
+
+	hubPort, err := hub.CreateHubPort(kurento.SinkType)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create output hub port: %v", err)
+	}
+
+	err = hubPort.ConnectTo(outputRTPEndpoint)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect output hub port to rtp: %v", err)
+	}
+
 	newRoom := &entity.Room{
-		ID:             roomID,
-		Clients:        make(map[string]*entity.Client),
-		Pipeline:       pipeline,
-		EndpointToUser: make(map[string]string),
-		MU:             &sync.RWMutex{},
+		ID:                roomID,
+		Clients:           make(map[string]*entity.Client),
+		Pipeline:          pipeline,
+		EndpointToUser:    make(map[string]string),
+		MU:                &sync.RWMutex{},
+		CompositeHub:      hub,
+		OutputRTPEndpoint: outputRTPEndpoint,
 	}
 
 	return rm.roomRepo.LoadOrStore(newRoom), nil
@@ -69,10 +116,15 @@ func (rm *DefaultRoomManager) HandleUserJoin(roomID, userID string) (*entity.Cli
 		return nil, err
 	}
 
-	publisherEndpoint, err := room.Pipeline.CreateWebRtcEndpoint()
+	publisherEndpoint, err := room.Pipeline.CreateWebRTCEndpoint()
 	if err != nil {
 		return nil, err
 	}
+	hubPort, err := room.CompositeHub.CreateHubPort(kurento.SourceType)
+	if err != nil {
+		return nil, err
+	}
+	publisherEndpoint.ConnectTo(hubPort)
 	rm.roomRepo.CreateEndpointToRoomMapping(publisherEndpoint.ID, roomID)
 
 	// try in rtp
@@ -90,26 +142,26 @@ func (rm *DefaultRoomManager) HandleUserJoin(roomID, userID string) (*entity.Cli
 	for existingUserID, existingClient := range room.Clients {
 		existingUserIds = append(existingUserIds, existingUserID)
 
-		subscriberEndpoint, err := room.Pipeline.CreateWebRtcEndpoint()
+		subscriberEndpoint, err := room.Pipeline.CreateWebRTCEndpoint()
 		if err != nil {
 			return nil, err
 		}
 		rm.roomRepo.CreateEndpointToRoomMapping(subscriberEndpoint.ID, roomID)
 		room.EndpointToUser[subscriberEndpoint.ID] = userID
 
-		existingClientSubscriberEndpoint, err := room.Pipeline.CreateWebRtcEndpoint()
+		existingClientSubscriberEndpoint, err := room.Pipeline.CreateWebRTCEndpoint()
 		if err != nil {
 			return nil, err
 		}
 		rm.roomRepo.CreateEndpointToRoomMapping(existingClientSubscriberEndpoint.ID, roomID)
 		room.EndpointToUser[existingClientSubscriberEndpoint.ID] = existingUserID
 
-		err = existingClient.PublisherEndpoint.ConnectToEndpoint(subscriberEndpoint)
+		err = existingClient.PublisherEndpoint.ConnectTo(subscriberEndpoint)
 		if err != nil {
 			return nil, err
 		}
 
-		err = publisherEndpoint.ConnectToEndpoint(existingClientSubscriberEndpoint)
+		err = publisherEndpoint.ConnectTo(existingClientSubscriberEndpoint)
 		if err != nil {
 			return nil, err
 		}
