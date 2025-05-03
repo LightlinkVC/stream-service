@@ -5,15 +5,11 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
-	"time"
 
-	"github.com/dgrijalva/jwt-go"
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
 	"github.com/lightlink/stream-service/pkg/room/application/roommanager"
 	"github.com/lightlink/stream-service/pkg/room/domain/dto"
-	"github.com/lightlink/stream-service/pkg/room/domain/entity"
 	"github.com/lightlink/stream-service/pkg/room/infrastructure/ws"
 )
 
@@ -27,20 +23,6 @@ func NewRoomHandler(roomManager roommanager.RoomManager, messagingServer ws.Mess
 		roomManager:     roomManager,
 		messagingServer: messagingServer,
 	}
-}
-
-func generateUserToken(secret, userID, roomID string) (string, error) {
-	claims := jwt.MapClaims{
-		"sub": userID,
-		"exp": time.Now().Add(time.Hour * 10).Unix(),
-		"channels": []string{
-			entity.RoomChannel(roomID),
-			entity.UserChannel(roomID, userID),
-		},
-	}
-
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString([]byte(secret))
 }
 
 type SignalingRequest struct {
@@ -189,26 +171,6 @@ func (h *RoomHandler) JoinHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusOK)
-}
-
-func (h *RoomHandler) InfoHandler(w http.ResponseWriter, r *http.Request) {
-	fmt.Println("Handling incoming info request")
-	userIDString := r.Header.Get("X-User-ID")
-	roomID := mux.Vars(r)["roomID"]
-
-	token, err := generateUserToken(os.Getenv("TOKEN_KEY"), userIDString, roomID)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"token": token,
-		"channels": map[string]string{
-			"room": entity.RoomChannel(roomID),
-			"user": entity.UserChannel(roomID, userIDString),
-		},
-	})
 }
 
 func (h *RoomHandler) ConnectionStateHandler(w http.ResponseWriter, r *http.Request) {

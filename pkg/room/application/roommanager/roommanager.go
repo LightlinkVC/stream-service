@@ -111,6 +111,7 @@ func (rm *DefaultRoomManager) getOrCreateRoom(roomID string) (*entity.Room, erro
 }
 
 func (rm *DefaultRoomManager) HandleUserJoin(roomID, userID string) (*entity.Client, error) {
+	fmt.Println("INFO-BUG: Handling User Joined")
 	room, err := rm.getOrCreateRoom(roomID)
 	if err != nil {
 		return nil, err

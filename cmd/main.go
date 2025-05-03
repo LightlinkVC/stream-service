@@ -64,7 +64,6 @@ func main() {
 	router := mux.NewRouter()
 
 	router.HandleFunc("/api/room/{roomID}", roomHandler.JoinHandler).Methods("POST")
-	router.HandleFunc("/api/room/{roomID}/info", roomHandler.InfoHandler).Methods("GET")
 	router.HandleFunc("/api/room/{roomID}/signal", roomHandler.SingalHandler).Methods("POST")
 	router.HandleFunc("/ws/api/room/{roomID}/trace", roomHandler.ConnectionStateHandler).Methods("GET")
 
