@@ -13,5 +13,30 @@ type Room struct {
 	Pipeline          *kurento.MediaPipeline
 	MU                *sync.RWMutex
 	CompositeHub      *kurento.Composite
+	OutputHubPort     *kurento.HubPort
 	OutputRTPEndpoint *kurento.RTPEndpoint
+}
+
+func (r *Room) SelfRelease() error {
+	err := r.Pipeline.SelfRelease()
+	if err != nil {
+		return err
+	}
+
+	err = r.OutputHubPort.SelfRelease()
+	if err != nil {
+		return err
+	}
+
+	err = r.OutputRTPEndpoint.SelfRelease()
+	if err != nil {
+		return err
+	}
+
+	err = r.CompositeHub.SelfRelease()
+	if err != nil {
+		return err
+	}
+
+	return nil
 }

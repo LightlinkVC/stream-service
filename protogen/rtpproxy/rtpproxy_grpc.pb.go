@@ -20,6 +20,7 @@ const _ = grpc.SupportPackageIsVersion9
 
 const (
 	RtpProxyService_ExchangeSdp_FullMethodName = "/rtpproxy.RtpProxyService/ExchangeSdp"
+	RtpProxyService_StopStream_FullMethodName  = "/rtpproxy.RtpProxyService/StopStream"
 )
 
 // RtpProxyServiceClient is the client API for RtpProxyService service.
@@ -29,6 +30,7 @@ const (
 // protoc --go_opt=paths=source_relative --go-grpc_opt=paths=source_relative --proto_path=proto --go_out=protogen --go-grpc_out=protogen proto/rtpproxy/rtpproxy.proto
 type RtpProxyServiceClient interface {
 	ExchangeSdp(ctx context.Context, in *SdpOffer, opts ...grpc.CallOption) (*SdpAnswer, error)
+	StopStream(ctx context.Context, in *RoomIdRequest, opts ...grpc.CallOption) (*StopStreamStatus, error)
 }
 
 type rtpProxyServiceClient struct {
@@ -49,6 +51,16 @@ func (c *rtpProxyServiceClient) ExchangeSdp(ctx context.Context, in *SdpOffer, o
 	return out, nil
 }
 
+func (c *rtpProxyServiceClient) StopStream(ctx context.Context, in *RoomIdRequest, opts ...grpc.CallOption) (*StopStreamStatus, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(StopStreamStatus)
+	err := c.cc.Invoke(ctx, RtpProxyService_StopStream_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RtpProxyServiceServer is the server API for RtpProxyService service.
 // All implementations must embed UnimplementedRtpProxyServiceServer
 // for forward compatibility.
@@ -56,6 +68,7 @@ func (c *rtpProxyServiceClient) ExchangeSdp(ctx context.Context, in *SdpOffer, o
 // protoc --go_opt=paths=source_relative --go-grpc_opt=paths=source_relative --proto_path=proto --go_out=protogen --go-grpc_out=protogen proto/rtpproxy/rtpproxy.proto
 type RtpProxyServiceServer interface {
 	ExchangeSdp(context.Context, *SdpOffer) (*SdpAnswer, error)
+	StopStream(context.Context, *RoomIdRequest) (*StopStreamStatus, error)
 	mustEmbedUnimplementedRtpProxyServiceServer()
 }
 
@@ -68,6 +81,9 @@ type UnimplementedRtpProxyServiceServer struct{}
 
 func (UnimplementedRtpProxyServiceServer) ExchangeSdp(context.Context, *SdpOffer) (*SdpAnswer, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ExchangeSdp not implemented")
+}
+func (UnimplementedRtpProxyServiceServer) StopStream(context.Context, *RoomIdRequest) (*StopStreamStatus, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method StopStream not implemented")
 }
 func (UnimplementedRtpProxyServiceServer) mustEmbedUnimplementedRtpProxyServiceServer() {}
 func (UnimplementedRtpProxyServiceServer) testEmbeddedByValue()                         {}
@@ -108,6 +124,24 @@ func _RtpProxyService_ExchangeSdp_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RtpProxyService_StopStream_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RoomIdRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RtpProxyServiceServer).StopStream(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RtpProxyService_StopStream_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RtpProxyServiceServer).StopStream(ctx, req.(*RoomIdRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // RtpProxyService_ServiceDesc is the grpc.ServiceDesc for RtpProxyService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -118,6 +152,10 @@ var RtpProxyService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ExchangeSdp",
 			Handler:    _RtpProxyService_ExchangeSdp_Handler,
+		},
+		{
+			MethodName: "StopStream",
+			Handler:    _RtpProxyService_StopStream_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

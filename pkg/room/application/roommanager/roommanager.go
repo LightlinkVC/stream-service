@@ -42,6 +42,15 @@ func NewDefaultRoomManager(
 	}
 }
 
+func (rm *DefaultRoomManager) getRoomByID(roomID string) (*entity.Room, error) {
+	room, err := rm.roomRepo.GetRoomByID(roomID)
+	if err != nil {
+		return room, err
+	}
+
+	return room, nil
+}
+
 func (rm *DefaultRoomManager) getOrCreateRoom(roomID string) (*entity.Room, error) {
 	room, err := rm.roomRepo.GetRoomByID(roomID)
 	if err == nil {
@@ -87,12 +96,12 @@ func (rm *DefaultRoomManager) getOrCreateRoom(roomID string) (*entity.Room, erro
 
 	fmt.Printf("HUBMETA:%v\n", hub)
 
-	hubPort, err := hub.CreateHubPort(kurento.SinkType)
+	outputHubPort, err := hub.CreateHubPort(kurento.SinkType)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create output hub port: %v", err)
 	}
 
-	err = hubPort.ConnectTo(outputRTPEndpoint)
+	err = outputHubPort.ConnectTo(outputRTPEndpoint)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect output hub port to rtp: %v", err)
 	}
@@ -104,6 +113,7 @@ func (rm *DefaultRoomManager) getOrCreateRoom(roomID string) (*entity.Room, erro
 		EndpointToUser:    make(map[string]string),
 		MU:                &sync.RWMutex{},
 		CompositeHub:      hub,
+		OutputHubPort:     outputHubPort,
 		OutputRTPEndpoint: outputRTPEndpoint,
 	}
 
@@ -121,21 +131,12 @@ func (rm *DefaultRoomManager) HandleUserJoin(roomID, userID string) (*entity.Cli
 	if err != nil {
 		return nil, err
 	}
-	hubPort, err := room.CompositeHub.CreateHubPort(kurento.SourceType)
+	inputHubPort, err := room.CompositeHub.CreateHubPort(kurento.SourceType)
 	if err != nil {
 		return nil, err
 	}
-	publisherEndpoint.ConnectTo(hubPort)
+	publisherEndpoint.ConnectTo(inputHubPort)
 	rm.roomRepo.CreateEndpointToRoomMapping(publisherEndpoint.ID, roomID)
-
-	// try in rtp
-	// data, err := startRTPEndpoint(room.Pipeline, publisherEndpoint)
-	// if err != nil {
-	// 	return nil, err
-	// }
-	// go startAudioPipeline(data.AudioPort)
-	// fmt.Println("DBG: Started listening through rtp with data: %v", data)
-	//
 
 	room.MU.RLock()
 	subscriberEndpoints := make(map[string]*kurento.WebRTCEndpoint)
@@ -176,6 +177,7 @@ func (rm *DefaultRoomManager) HandleUserJoin(roomID, userID string) (*entity.Cli
 		UserID:              userID,
 		PublisherEndpoint:   publisherEndpoint,
 		SubscriberEndpoints: subscriberEndpoints,
+		InputHubPort:        inputHubPort,
 	}
 
 	room.MU.Lock()
@@ -199,7 +201,11 @@ func (rm *DefaultRoomManager) HandleUserJoin(roomID, userID string) (*entity.Cli
 }
 
 func (rm *DefaultRoomManager) HandleUserLeft(roomID, userID string) error {
-	room, err := rm.getOrCreateRoom(roomID)
+	room, err := rm.getRoomByID(roomID)
+	if err == entity.ErrRoomNotFound {
+		fmt.Println("PANIC ERR FATAL: User left not allocated room")
+		return err
+	}
 	if err != nil {
 		return err
 	}
@@ -213,26 +219,38 @@ func (rm *DefaultRoomManager) HandleUserLeft(roomID, userID string) error {
 	room.MU.Lock()
 	delete(room.EndpointToUser, client.PublisherEndpoint.ID)
 
-	err = client.PublisherEndpoint.SelfRelease()
+	releasedEndpointIDs, err := client.SelfRelease()
 	if err != nil {
 		return err
 	}
 
-	for endpointID, endpoint := range client.SubscriberEndpoints {
+	for _, endpointID := range releasedEndpointIDs {
 		rm.roomRepo.DeleteEndpointToRoomMapping(endpointID)
 		delete(room.EndpointToUser, endpointID)
-
-		err := endpoint.SelfRelease()
-		if err != nil {
-			return err
-		}
 	}
+
 	delete(room.Clients, userID)
 	room.MU.Unlock()
 
-	if len(room.Clients) == 0 {
+	isEmpty := len(room.Clients) == 0
+	if isEmpty {
 		fmt.Printf("Room with id: %s is emty now\n", roomID)
+		room.SelfRelease()
 		rm.roomRepo.DeleteRoom(roomID)
+
+		stopStreamStatusProto, err := rm.rtpProxyClient.StopStream(context.Background(),
+			&proto.RoomIdRequest{
+				RoomId: roomID,
+			},
+		)
+		if err != nil {
+			return err
+		}
+
+		if !stopStreamStatusProto.Status {
+			fmt.Printf("ERR: Failed to stop active Gstreamer stream for room with id: %s", roomID)
+			return fmt.Errorf("failed to stop active Gstreamer stream for room with id: %s", roomID)
+		}
 
 		return nil
 	}
