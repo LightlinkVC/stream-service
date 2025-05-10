@@ -91,7 +91,7 @@ func (rm *DefaultRoomManager) getOrCreateRoom(roomID string) (*entity.Room, erro
 	}
 	err = outputRTPEndpoint.ProcessSDPAnswer(sdpAnwerProto.Sdp)
 	if err != nil {
-		return nil, fmt.Errorf("failed to apply sdp answer for rtp: %v", err)
+		fmt.Printf("failed to apply sdp answer: %s for rtp: %v\n", sdpAnwerProto.Sdp, err)
 	}
 
 	fmt.Printf("HUBMETA:%v\n", hub)
