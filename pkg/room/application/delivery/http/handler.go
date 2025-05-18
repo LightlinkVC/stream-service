@@ -155,6 +155,26 @@ func (h *RoomHandler) SingalHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+	case "mediaChange":
+		var mediaStatus struct {
+			Video  bool   `json:"video"`
+			Audio  bool   `json:"audio"`
+			UserID string `json:"user_id"`
+		}
+		if err := json.Unmarshal(req.Payload, &mediaStatus); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		mediaStatus.UserID = userID
+
+		h.messagingServer.PublishToRoom(
+			roomID,
+			map[string]interface{}{
+				"type":    "media_change",
+				"payload": mediaStatus,
+			},
+		)
 	}
 
 	w.WriteHeader(http.StatusOK)
