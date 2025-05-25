@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package rtpproxy;
+
+option go_package = "github.com/lightlink/stream-service/protogen/rtpproxy";
+
+message SdpOffer {
+    string room_id = 1;
+    string sdp = 2;
+}
+
+message SdpAnswer {
+    string sdp = 1;
+}
+
+message RoomIdRequest {
+    string room_id = 1;
+}
+
+message StopStreamStatus {
+    bool status = 1;
+}
+
+// protoc --go_opt=paths=source_relative --go-grpc_opt=paths=source_relative --proto_path=proto --go_out=protogen --go-grpc_out=protogen proto/rtpproxy/rtpproxy.proto
+service RtpProxyService {
+    rpc ExchangeSdp (SdpOffer) returns (SdpAnswer);
+    rpc StopStream(RoomIdRequest) returns (StopStreamStatus);
+}
